@@ -11,42 +11,52 @@ function App() {
     const run = async () => {
       try {
         setLoading(true);
-
+  
         // Step 1: Generate the script
         const scriptRes = await fetch("http://127.0.0.1:5000/api/generate-script", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: "Trump and elon musk get into a fight at the white house" })
+          body: JSON.stringify({ prompt: "Explain how the pyramids were built in ancient egypt" })
         });
         const scriptData = await scriptRes.json();
-
+  
         if (!scriptData.script) throw new Error(scriptData.error || "Script generation failed");
-
+  
         setScript(scriptData.script);
-
-        // Step 2: Generate the images
-        const imageRes = await fetch("http://127.0.0.1:5000/api/generate-images", {
+  
+        // Step 2: Start image generation (async job)
+        const startRes = await fetch("http://127.0.0.1:5000/api/generate-images", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ script: scriptData.script })
         });
-
-        const imageData = await imageRes.json();
-
-        if (!imageData.images || !imageData.sentences) throw new Error(imageData.error || "Image generation failed");
-
-        setImages(imageData.images);
-        setSentences(imageData.sentences);
-        setLoading(false);
+        const { job_id } = await startRes.json();
+  
+        // Step 3: Poll until images are ready
+        const poll = async () => {
+          const statusRes = await fetch(`http://127.0.0.1:5000/api/image-status/${job_id}`);
+          const statusData = await statusRes.json();
+  
+          if (statusData.status === "done") {
+            setImages(statusData.images);
+            setSentences(statusData.sentences);
+            setLoading(false);
+          } else {
+            setTimeout(poll, 3000); // Retry in 3 seconds
+          }
+        };
+  
+        poll();
       } catch (err) {
         console.error(err);
         setError(err.message);
         setLoading(false);
       }
     };
-
+  
     run();
   }, []);
+  
 
   if (loading) return <div style={{ padding: 20 }}>Generating script and images...</div>;
   if (error) return <div style={{ padding: 20, color: "red" }}>Error: {error}</div>;

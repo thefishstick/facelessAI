@@ -2,18 +2,28 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
 import replicate
-import asyncio
 import time
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 CORS(app)
 
-REPLICATE_API_TOKEN = "r8_NqiTCDL7YA5yn9sHNM6zPIgeXNACIvh3M3i0f"# os.getenv("REPLICATE_API_TOKEN")
+# Set Replicate API token
+REPLICATE_API_TOKEN = "r8_NqiTCDL7YA5yn9sHNM6zPIgeXNACIvh3M3i0f"
 os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
-# prefix_prompt = "in the style of an animated cinematic scene, vibrant colors, semi-realistic, dynamic lighting, soft shadows, expressive characters, high detail, Pixar meets Unreal Engine: "
-prefix_prompt = "in a style that is hyper realistic, HD, real people: "
 
-# Async wrapper for replicate.run
+# Prompt style prefix
+prefix_prompt = (
+    "in the style of an animated cinematic scene, vibrant colors, semi-realistic, "
+    "dynamic lighting, soft shadows, expressive characters, high detail, Pixar meets Unreal Engine: "
+)
+
+# In-memory job store
+jobs = {}
+
+# Sentence splitter
 def split_script_into_sentences(script):
     sentence_endings = ['.', '!', '?']
     sentences = []
@@ -29,17 +39,16 @@ def split_script_into_sentences(script):
 
     return sentences
 
+# Blocking synchronous image generation
 def generate_image_sync(prompt):
     prediction = replicate.predictions.create(
         version="black-forest-labs/flux-schnell",
         input={
             "prompt": prefix_prompt + prompt,
             "aspect_ratio": "9:16"
-            # "scheduler": "K_EULER"
         }
     )
 
-    # Poll until complete
     while prediction.status not in ["succeeded", "failed", "canceled"]:
         time.sleep(1)
         prediction.reload()
@@ -48,8 +57,9 @@ def generate_image_sync(prompt):
         return prediction.output[0] if prediction.output else None
     return None
 
+# POST to start image generation
 @app.route('/api/generate-images', methods=['POST'])
-def generate_images_endpoint():
+def generate_images_async():
     data = request.get_json()
     script = data.get("script")
 
@@ -57,17 +67,28 @@ def generate_images_endpoint():
         return jsonify({"error": "No script provided"}), 400
 
     sentences = split_script_into_sentences(script)
-    image_urls = [generate_image_sync(sentence) for sentence in sentences]
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"status": "pending", "sentences": sentences, "images": []}
 
-    return jsonify({
-        "sentences": sentences,
-        "images": image_urls
-    })
+    def run_generation():
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            images = list(executor.map(generate_image_sync, sentences))
+        jobs[job_id]["images"] = images
+        jobs[job_id]["status"] = "done"
 
-@app.route('/api/hello')
-def hello():
-    return jsonify(message="Hello from Flask!")
+    threading.Thread(target=run_generation).start()
 
+    return jsonify({"job_id": job_id})
+
+# GET to poll image status
+@app.route('/api/image-status/<job_id>', methods=['GET'])
+def check_image_status(job_id):
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Invalid job ID"}), 404
+    return jsonify(job)
+
+# Script generation using GPT-4o
 @app.route('/api/generate-script', methods=['POST'])
 def generate_script():
     data = request.get_json()
@@ -85,13 +106,15 @@ def generate_script():
         full_response = ""
         for event in replicate.stream("openai/gpt-4o", input=input):
             full_response += str(event)
-
         return jsonify({"script": full_response})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
+# Basic health check
+@app.route('/api/hello')
+def hello():
+    return jsonify(message="Hello from Flask!")
 
 if __name__ == '__main__':
     app.run(debug=True)

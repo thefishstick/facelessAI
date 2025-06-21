@@ -1,0 +1,13 @@
+# .gitignore
+
+# React
+/frontend/node_modules
+/frontend/build
+
+# Python
+/venv
+__pycache__/
+/*.pyc
+
+# Mac system files
+.DS_Store

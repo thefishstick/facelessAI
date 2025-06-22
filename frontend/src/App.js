@@ -9,6 +9,7 @@ import Editor from './pages/Editor';
 import FinalOutput from './pages/FinalOutput';
 import MyVideos    from './pages/MyVideos';
 import Completed    from './pages/Completed';
+import Steps    from './pages/Steps';
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/final"     element={<FinalOutput />} />
         <Route path="/my-videos" element={<MyVideos />} />
         <Route path="/completed" element={<Completed />} />
+        <Route path="/steps" element={<Steps />} />
       </Routes>
     </Router>
   );

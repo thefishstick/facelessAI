@@ -78,7 +78,7 @@ export default function Home() {
   /* ───────── handlers ───────── */
   const handleCreateVideo = () => {
     if (!prompt.trim()) return;
-    navigate('/style', { state: { prompt } });
+    navigate('/steps', { state: { prompt } });
   };
 
   const handleRollTheDice = () => {

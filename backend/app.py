@@ -456,7 +456,7 @@ def generate_script():
     data = request.get_json()
     prompt = data.get("prompt")
 
-    txt = "Please generate a short, simple, 6-7 sentence story or tutorial about the following prompt. Make sure each sentence has some specific, unique content, and ties to the overall story/prompt. The tone is like a social media video narrator. Use short sentences and very simple language. If you are asked to describe something fictional, do not mention it is fictional. Pretend it is real. Here is the prompt: "
+    txt = "Please generate a short, simple, 5-6 sentence story or tutorial about the following prompt. Make sure each sentence has some specific, unique content, and ties to the overall story/prompt. Don't use quotes or speech. The tone is like a social media video narrator. Use short sentences and very simple language. If you are asked to describe something fictional, do not mention it is fictional. Pretend it is real. Here is the prompt: "
     txt_and_prompt = txt + prompt
 
     if not txt_and_prompt:
@@ -603,6 +603,74 @@ def generate_audio():
     except Exception as e:
         print("🔥 Error generating audio:", str(e))
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/regenerate-image", methods=["POST"])
+def regenerate_image():
+    """
+    Body: { "text": "<edited sentence>",
+            "style_prompt": "<optional style prefix>" }
+
+    Returns: { "image_url": "https://…" }  or  { "error": "…" }
+    """
+    payload       = request.get_json(silent=True) or {}
+    text          = (payload.get("text") or "").strip()
+    style_prompt  = (payload.get("style_prompt") or "").strip()
+
+    if not text:
+        return jsonify({"error": "text required"}), 400
+
+    try:
+        # build "<style>: <sentence>"  (or just sentence)
+        final_prompt = f"{style_prompt}: {text}" if style_prompt else text
+
+        # --- call Replicate synchronously ---
+        pred = replicate.predictions.create(
+            version="black-forest-labs/flux-schnell",
+            input={
+                "prompt"        : final_prompt,
+                "aspect_ratio"  : "9:16",
+                "output_quality": 80
+            }
+        )
+        while pred.status not in ("succeeded", "failed", "canceled"):
+            time.sleep(1)
+            pred.reload()
+
+        if pred.status != "succeeded" or not pred.output:
+            raise RuntimeError("Replicate failed")
+
+        return jsonify({"image_url": pred.output[0]})
+
+    except Exception as err:
+        return jsonify({"error": str(err)}), 500
+
+
+@app.route("/api/regenerate-audio", methods=["POST"])
+def regenerate_audio():
+    """
+    Body: { "text": "<edited narrator text>" }
+
+    Returns: { "audio_url": "https://…" }  or  { "error": "…" }
+    """
+    payload = request.get_json(silent=True) or {}
+    text    = (payload.get("text") or "").strip()
+
+    if not text:
+        return jsonify({"error": "text required"}), 400
+
+    try:
+        out = replicate.run(
+            "jaaari/kokoro-82m:f559560eb822dc509045f3921a1921234918b91739db4bf3daab2169b71c7a13",
+            input={
+                "text" : text,
+                "speed": 1,
+                "voice": "af_alloy"
+            }
+        )
+        return jsonify({"audio_url": str(out)})
+
+    except Exception as err:
+        return jsonify({"error": str(err)}), 500
 
 # Basic health check
 @app.route('/api/hello')

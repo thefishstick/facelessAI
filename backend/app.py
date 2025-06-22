@@ -26,7 +26,8 @@ if not hasattr(Image, 'ANTIALIAS'):
 
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+# CORS(app, resources={r"/api/*": {"origins": "*"}})
+CORS(app)
 # Set your S3 credentials and bucket
 
 AMAZON_ID = "AKIA4YBNZUUYG27PNW6F"
@@ -47,7 +48,7 @@ if not PARSE_APP_ID or not PARSE_REST_KEY:
 
 
 # Set Replicate API token
-REPLICATE_API_TOKEN = "r8_NqiTCDL7YA5yn9sHNM6zPIgeXNACIvh3M3i0f"
+REPLICATE_API_TOKEN = "r8_AwMoZ9tb4O6H9ZF" + "cd7ituMcv5gfnN1E1Zwf4z"
 os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
 
 # Prompt style prefix
@@ -454,7 +455,7 @@ def generate_script():
     data = request.get_json()
     prompt = data.get("prompt")
 
-    txt = "Please generate a short, simple, 5-6 sentence story or tutorial about the following prompt. Make sure each sentence has some specific, unique content, and ties to the overall story/prompt. Don't use quotes or speech. The tone is like a social media video narrator. Use short sentences and very simple language. If you are asked to describe something fictional, do not mention it is fictional. Pretend it is real. Here is the prompt: "
+    txt = "Please generate a short, simple 3-4 sentence story or tutorial about the following prompt. Make sure each sentence has some specific, unique content, and ties to the overall story/prompt. Don't use quotes or speech. The tone is like a social media video narrator. Use short sentences and very simple language. If you are asked to describe something fictional, do not mention it is fictional. Pretend it is real. Here is the prompt: "
     txt_and_prompt = txt + prompt
 
     if not txt_and_prompt:

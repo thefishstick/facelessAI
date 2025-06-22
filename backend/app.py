@@ -51,6 +51,7 @@ prefix_prompt = (
 
 # In-memory job store
 jobs = {}
+video_jobs = {} 
 
 def uploadAnyFile2S3(path, unique_id):
     _, extension = os.path.splitext(path)
@@ -93,7 +94,7 @@ def generate_image_sync(prompt):
     return None
 
 @app.route('/api/compile-video', methods=['POST'])
-def compile_video():
+def start_compile_video_job():
     data = request.get_json()
     script = data.get("script")
     images = data.get("images")
@@ -102,56 +103,108 @@ def compile_video():
     if not script or not images or not audio_urls:
         return jsonify({"error": "script, images, and audio_urls are required"}), 400
 
-    try:
-        assert len(images) == len(audio_urls), "Mismatched images and audio count"
-        job_id = str(uuid.uuid4())
-        temp_dir = f"/tmp/{job_id}"
-        os.makedirs(temp_dir, exist_ok=True)
+    job_id = str(uuid.uuid4())
+    video_jobs[job_id] = { "status": "pending", "video_url": None, "error": None }
 
-        video_clips = []
+    def run_compile():
+        try:
+            temp_dir = f"/tmp/{job_id}"
+            os.makedirs(temp_dir, exist_ok=True)
 
-        for idx, (img_url, audio_url) in enumerate(zip(images, audio_urls)):
-            img_path = os.path.join(temp_dir, f"img_{idx}.jpg")
-            audio_path = os.path.join(temp_dir, f"audio_{idx}.mp3")
-            clip_path = os.path.join(temp_dir, f"clip_{idx}.mp4")
+            video_clips = []
 
-            # Download image and audio
-            with open(img_path, "wb") as f:
-                f.write(requests.get(img_url).content)
-            with open(audio_path, "wb") as f:
-                f.write(requests.get(audio_url).content)
+            for idx, (img_url, audio_url) in enumerate(zip(images, audio_urls)):
+                img_path = os.path.join(temp_dir, f"img_{idx}.jpg")
+                audio_path = os.path.join(temp_dir, f"audio_{idx}.mp3")
+                clip_path = os.path.join(temp_dir, f"clip_{idx}.mp4")
 
-            # Create video clip
-            audio = AudioFileClip(audio_path)
-            duration = audio.duration
+                with open(img_path, "wb") as f:
+                    f.write(requests.get(img_url).content)
+                with open(audio_path, "wb") as f:
+                    f.write(requests.get(audio_url).content)
 
-            clip = (
-                ImageClip(img_path)
-                .set_duration(duration)
-                .set_audio(audio)
-                .set_fps(30)
-                .resize(height=1920)
-                .fadein(0.5)
-                .fadeout(0.5)
+                audio = AudioFileClip(audio_path)
+                duration = audio.duration
+
+                clip = (
+                    ImageClip(img_path)
+                    .set_duration(duration)
+                    .set_audio(audio)
+                    .set_fps(30)
+                    .resize(height=1920)
+                    .fadein(0.5)
+                    .fadeout(0.5)
+                )
+
+                clip.write_videofile(clip_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
+                video_clips.append(clip_path)
+
+            # Concatenate all sub-clips
+            final_video_path = os.path.join(temp_dir, "final_output.mp4")
+            clips = [VideoFileClip(p) for p in video_clips]
+            final = concatenate_videoclips(clips, method="compose")
+            final.write_videofile(final_video_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
+
+            # Upload final video to S3 for Replicate access
+            replicate_url = uploadAnyFile2S3(final_video_path, f"final_{job_id}_raw")
+            print("replicate_url:", replicate_url)
+
+            # Write transcript file to disk
+            transcript_path = os.path.join(temp_dir, "transcript.txt")
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                for line in split_script_into_sentences(script):
+                    f.write(line + "\n")
+
+            # Upload transcript to S3
+            transcript_url = uploadAnyFile2S3(transcript_path, f"{job_id}_transcript")
+
+            # Add captions via Replicate autocaption model
+            captioned_output = replicate.run(
+                "fictions-ai/autocaption:18a45ff0d95feb4449d192bbdc06b4a6df168fa33def76dfc51b78ae224b599b",
+                input={
+                    "video_file_input": replicate_url,
+                    # "transcript_file_input": transcript_url,
+                    "output_video": True,
+                    "output_transcript": False,
+                    "font": "Poppins/Poppins-ExtraBold.ttf",
+                    "fontsize": 5,
+                    "MaxChars": 26,
+                    "color": "white",
+                    "stroke_color": "black",
+                    "stroke_width": 2.6,
+                    "subs_position": "bottom75",
+                    "highlight_color": "yellow",
+                    "kerning": -5,
+                    "opacity": 0
+                }
             )
 
-            clip.write_videofile(clip_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
-            video_clips.append(clip_path)
+            # Save captioned video locally
+            captioned_url = captioned_output[0]
+            response = requests.get(captioned_url)
+            
+            captioned_video_path = os.path.join(temp_dir, "final_captioned.mp4")
+            with open(captioned_video_path, "wb") as f:
+                f.write(response.content)
 
-        # Concatenate video files
-        final_video_path = os.path.join(temp_dir, "final_output.mp4")
-        clips = [VideoFileClip(p) for p in video_clips]
-        final = concatenate_videoclips(clips, method="compose")
-        final.write_videofile(final_video_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
+            # Upload final captioned video to S3
+            final_url = uploadAnyFile2S3(captioned_video_path, f"final_{job_id}_captioned")
 
-        # Upload to S3
-        final_url = uploadAnyFile2S3(final_video_path, f"final_{job_id}")
+            video_jobs[job_id] = { "status": "done", "video_url": final_url, "error": None }
 
-        return jsonify({"video_url": final_url})
+        except Exception as e:
+            print("🔥 Error compiling video:", str(e))
+            video_jobs[job_id] = { "status": "error", "video_url": None, "error": str(e) }
 
-    except Exception as e:
-        print("🔥 Error during video compilation:", str(e))
-        return jsonify({"error": str(e)}), 500
+    threading.Thread(target=run_compile).start()
+    return jsonify({ "job_id": job_id })
+
+@app.route('/api/video-status/<job_id>', methods=['GET'])
+def check_video_status(job_id):
+    job = video_jobs.get(job_id)
+    if not job:
+        return jsonify({ "error": "Invalid job ID" }), 404
+    return jsonify(job)
 
 @app.route('/api/combine-audio-image', methods=['POST'])
 def combine_audio_image():
@@ -245,7 +298,7 @@ def generate_script():
 
     input = {
         "prompt": prompt,
-        "system_prompt": "You are a helpful tool that writes 2-3 sentence tiny, small tutorials/instructions. The tone is like a social media video narrator. Use short sentences and very simple language. They can be historical or fictional, depending on the prompt you are asked."
+        "system_prompt": "You are a helpful tool that writes 4-5 sentence tiny, small tutorials/instructions. The tone is like a social media video narrator. Use short sentences and very simple language. They can be historical or fictional, depending on the prompt you are asked."
     }
 
     try:

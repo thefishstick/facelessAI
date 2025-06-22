@@ -10,6 +10,9 @@ function App() {
   const [error, setError] = useState('');
   const pollingTimeoutRef = useRef(null);
 
+  const [finalVideoPolling, setFinalVideoPolling] = useState(false);
+const [finalVideoJobId, setFinalVideoJobId] = useState('');
+
   useEffect(() => {
     const run = async () => {
       try {
@@ -18,7 +21,7 @@ function App() {
         const scriptRes = await fetch("http://127.0.0.1:5000/api/generate-script", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: "Explain how the pyramids were built in ancient egypt" })
+          body: JSON.stringify({ prompt: "Explain how the lightbulb was invented" })
         });
         const scriptData = await scriptRes.json();
         if (!scriptData.script) throw new Error(scriptData.error || "Script generation failed");
@@ -72,8 +75,10 @@ function App() {
     run();
   }, []);
 
+
   const handleCreateFinalVideo = async () => {
     try {
+      setFinalVideoPolling(true);
       const res = await fetch("http://127.0.0.1:5000/api/compile-video", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -83,14 +88,33 @@ function App() {
           audio_urls: audioUrls
         })
       });
-
+  
       const data = await res.json();
-      console.log("🎬 Final video URL:", data.video_url);
-      if (data.video_url) {
-        setFinalVideoUrl(data.video_url);
-      }
+      const jobId = data.job_id;
+      if (!jobId) throw new Error("No job_id returned");
+      setFinalVideoJobId(jobId);
+  
+      // Poll for video completion
+      const pollVideoStatus = async () => {
+        const res = await fetch(`http://127.0.0.1:5000/api/video-status/${jobId}`);
+        const data = await res.json();
+  
+        if (data.status === "done") {
+          setFinalVideoUrl(data.video_url);
+          setFinalVideoPolling(false);
+        } else if (data.status === "error") {
+          setError(`Final video generation failed: ${data.error}`);
+          setFinalVideoPolling(false);
+        } else {
+          setTimeout(pollVideoStatus, 3000);
+        }
+      };
+  
+      pollVideoStatus();
     } catch (err) {
-      console.error("Failed to create final video:", err);
+      console.error("Failed to start final video job:", err);
+      setError("Something went wrong while compiling your video.");
+      setFinalVideoPolling(false);
     }
   };
 

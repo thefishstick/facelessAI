@@ -13,9 +13,11 @@ import uuid
 import os
 from moviepy.editor import AudioFileClip, ImageClip, VideoFileClip
 from moviepy.editor import concatenate_videoclips
+from moviepy.audio.AudioClip import CompositeAudioClip
 from flask import request, jsonify
 import urllib.parse
 from PIL import Image
+
 
 # Monkey patch for Pillow 10+ compatibility with moviepy
 if not hasattr(Image, 'ANTIALIAS'):
@@ -81,7 +83,8 @@ def generate_image_sync(prompt):
         version="black-forest-labs/flux-schnell",
         input={
             "prompt": prefix_prompt + prompt,
-            "aspect_ratio": "9:16"
+            "aspect_ratio": "9:16",
+            "output_quality": 80
         }
     )
 
@@ -92,112 +95,172 @@ def generate_image_sync(prompt):
     if prediction.status == "succeeded":
         return prediction.output[0] if prediction.output else None
     return None
-
 @app.route('/api/compile-video', methods=['POST'])
 def start_compile_video_job():
-    data = request.get_json()
-    script = data.get("script")
-    images = data.get("images")
+    data       = request.get_json()
+    script     = data.get("script")
+    images     = data.get("images")
     audio_urls = data.get("audio_urls")
 
     if not script or not images or not audio_urls:
         return jsonify({"error": "script, images, and audio_urls are required"}), 400
 
     job_id = str(uuid.uuid4())
-    video_jobs[job_id] = { "status": "pending", "video_url": None, "error": None }
+    video_jobs[job_id] = {"status": "pending", "video_url": None, "error": None}
+    print(f"🎬 [JOB {job_id}] Started")
 
+    # ---------- threaded worker ----------
     def run_compile():
         try:
             temp_dir = f"/tmp/{job_id}"
             os.makedirs(temp_dir, exist_ok=True)
 
-            video_clips = []
+            # ------------------------------------------------------------------
+            # 1)  Build each (image + voice-over) scene with a slow zoom effect
+            # ------------------------------------------------------------------
+            scene_paths = []
+            for idx, (img_url, voice_url) in enumerate(zip(images, audio_urls)):
+                print(f"   ↳ Scene {idx+1}/{len(images)} – downloading assets")
+                img_path   = os.path.join(temp_dir, f"img_{idx}.jpg")
+                voice_path = os.path.join(temp_dir, f"voice_{idx}.mp3")
+                clip_path  = os.path.join(temp_dir, f"clip_{idx}.mp4")
 
-            for idx, (img_url, audio_url) in enumerate(zip(images, audio_urls)):
-                img_path = os.path.join(temp_dir, f"img_{idx}.jpg")
-                audio_path = os.path.join(temp_dir, f"audio_{idx}.mp3")
-                clip_path = os.path.join(temp_dir, f"clip_{idx}.mp4")
+                with open(img_path,   "wb") as f: f.write(requests.get(img_url).content)
+                with open(voice_path, "wb") as f: f.write(requests.get(voice_url).content)
 
-                with open(img_path, "wb") as f:
-                    f.write(requests.get(img_url).content)
-                with open(audio_path, "wb") as f:
-                    f.write(requests.get(audio_url).content)
-
-                audio = AudioFileClip(audio_path)
+                audio    = AudioFileClip(voice_path)
                 duration = audio.duration
+                base     = ImageClip(img_path)
+
+                # --- scale & zoom (Ken-Burns) ---
+                TARGET_W, TARGET_H = 1080, 1920
+                w, h = base.size
+                scale0 = (TARGET_H / h) if w/h > TARGET_W/TARGET_H else (TARGET_W / w)
+                def zoom(t):       # 10 % zoom-in over clip
+                    return scale0 * (1 + 0.10 * t / duration)
 
                 clip = (
-                    ImageClip(img_path)
-                    .set_duration(duration)
-                    .set_audio(audio)
-                    .set_fps(30)
-                    .resize(height=1920)
-                    .fadein(0.5)
-                    .fadeout(0.5)
+                    base
+                      .resize(zoom)                                  # dynamic resize
+                      .crop(x_center=TARGET_W/2, y_center=TARGET_H/2,
+                            width=TARGET_W, height=TARGET_H)         # 9:16 crop
+                      .set_duration(duration)
+                      .set_audio(audio)
+                      .set_fps(30)
+                      .fadein(0.4)
+                      .fadeout(0.4)
+                )
+                clip.write_videofile(clip_path, codec="libx264",
+                                     audio_codec="aac",
+                                     verbose=False, logger=None)
+                scene_paths.append(clip_path)
+
+            # ------------------------------------------------------------------
+            # 2)  Concatenate scenes
+            # ------------------------------------------------------------------
+            print("🔗 Concatenating scenes …")
+            final_raw = os.path.join(temp_dir, "final_raw.mp4")
+            concatenate_videoclips(
+                [VideoFileClip(p) for p in scene_paths],
+                method="compose"
+            ).write_videofile(final_raw, codec="libx264", audio_codec="aac",
+                              verbose=False, logger=None)
+
+            # ------------------------------------------------------------------
+            # 3)  Upload raw video → S3 (Replicate needs https)
+            # ------------------------------------------------------------------
+            video_s3_url = uploadAnyFile2S3(final_raw, f"{job_id}_raw")
+            print("☁️  Uploaded raw video to S3")
+
+            # ------------------------------------------------------------------
+            # 4)  Kick off *both* captioning & music-gen in parallel
+            # ------------------------------------------------------------------
+            print("📝 Sending to Replicate – captions & bg-music")
+            def call_captions():
+                return replicate.run(
+                    "fictions-ai/autocaption:18a45ff0d95feb4449d192bbdc06b4a6df168fa33def76dfc51b78ae224b599b",
+                    input={
+                        "video_file_input": video_s3_url,
+                        "output_video":     True,
+                        "output_transcript": False,
+                        "font": "Poppins/Poppins-ExtraBold.ttf",
+                        "fontsize": 4,
+                        "MaxChars": 26,
+                        "color": "white",
+                        "stroke_color": "black",
+                        "stroke_width": 2.6,
+                        "subs_position": "bottom75",
+                        "highlight_color": "yellow",
+                        "kerning": -5,
+                        "opacity": 0
+                    }
                 )
 
-                clip.write_videofile(clip_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
-                video_clips.append(clip_path)
+            def call_music():
+                return replicate.run(
+                    "ardianfe/music-gen-fn-200e:96af46316252ddea4c6614e31861876183b59dce84bad765f38424e87919dd85",
+                    input={
+                        "prompt": "chill music with construction vibes sound behind, dominant in acoustic guitar and piano",
+                        "duration": 60,
+                        "top_k": 250,
+                        "top_p": 0,
+                        "temperature": 1,
+                        "continuation": False,
+                        "output_format": "wav",
+                        "multi_band_diffusion": False,
+                        "normalization_strategy": "loudness",
+                        "classifier_free_guidance": 3
+                    }
+                )
 
-            # Concatenate all sub-clips
-            final_video_path = os.path.join(temp_dir, "final_output.mp4")
-            clips = [VideoFileClip(p) for p in video_clips]
-            final = concatenate_videoclips(clips, method="compose")
-            final.write_videofile(final_video_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                future_captions = ex.submit(call_captions)
+                future_music    = ex.submit(call_music)
 
-            # Upload final video to S3 for Replicate access
-            replicate_url = uploadAnyFile2S3(final_video_path, f"final_{job_id}_raw")
-            print("replicate_url:", replicate_url)
+                caption_out = future_captions.result()
+                music_out   = future_music.result()
 
-            # Write transcript file to disk
-            transcript_path = os.path.join(temp_dir, "transcript.txt")
-            with open(transcript_path, "w", encoding="utf-8") as f:
-                for line in split_script_into_sentences(script):
-                    f.write(line + "\n")
+            # ----- download captioned video -----
+            cap_url = caption_out[0] if isinstance(caption_out, list) else caption_out
+            cap_path = os.path.join(temp_dir, "captioned.mp4")
+            with open(cap_path, "wb") as f:
+                f.write(requests.get(cap_url).content)
 
-            # Upload transcript to S3
-            transcript_url = uploadAnyFile2S3(transcript_path, f"{job_id}_transcript")
+            # ----- download bg-music wav -----
+            music_url = music_out[0] if isinstance(music_out, list) else music_out
+            music_path = os.path.join(temp_dir, "bg_music.wav")
+            with open(music_path, "wb") as f:
+                f.write(requests.get(music_url).content)
 
-            # Add captions via Replicate autocaption model
-            captioned_output = replicate.run(
-                "fictions-ai/autocaption:18a45ff0d95feb4449d192bbdc06b4a6df168fa33def76dfc51b78ae224b599b",
-                input={
-                    "video_file_input": replicate_url,
-                    # "transcript_file_input": transcript_url,
-                    "output_video": True,
-                    "output_transcript": False,
-                    "font": "Poppins/Poppins-ExtraBold.ttf",
-                    "fontsize": 5,
-                    "MaxChars": 26,
-                    "color": "white",
-                    "stroke_color": "black",
-                    "stroke_width": 2.6,
-                    "subs_position": "bottom75",
-                    "highlight_color": "yellow",
-                    "kerning": -5,
-                    "opacity": 0
-                }
-            )
+            # ------------------------------------------------------------------
+            # 5)  Merge music with captioned video
+            # ------------------------------------------------------------------
+            print("🎧 Merging background music …")
+            vid  = VideoFileClip(cap_path)
+            mus  = AudioFileClip(music_path).volumex(0.3)          # softer music
+            final_audio = CompositeAudioClip([vid.audio, mus.set_duration(vid.duration)])
+            vid_final   = vid.set_audio(final_audio)
 
-            # Save captioned video locally
-            captioned_url = captioned_output[0]
-            response = requests.get(captioned_url)
-            
-            captioned_video_path = os.path.join(temp_dir, "final_captioned.mp4")
-            with open(captioned_video_path, "wb") as f:
-                f.write(response.content)
+            final_full = os.path.join(temp_dir, "final_captioned_music.mp4")
+            vid_final.write_videofile(final_full, codec="libx264", audio_codec="aac",
+                                      bitrate="3M", verbose=False, logger=None)
 
-            # Upload final captioned video to S3
-            final_url = uploadAnyFile2S3(captioned_video_path, f"final_{job_id}_captioned")
+            # ------------------------------------------------------------------
+            # 6)  Upload finished asset
+            # ------------------------------------------------------------------
+            final_url = uploadAnyFile2S3(final_full, f"final_{job_id}")
+            print(f"✅ [JOB {job_id}] Done → {final_url}")
 
-            video_jobs[job_id] = { "status": "done", "video_url": final_url, "error": None }
+            video_jobs[job_id] = {"status": "done", "video_url": final_url, "error": None}
 
         except Exception as e:
-            print("🔥 Error compiling video:", str(e))
-            video_jobs[job_id] = { "status": "error", "video_url": None, "error": str(e) }
+            print(f"🔥 [JOB {job_id}] Error:", e)
+            video_jobs[job_id] = {"status": "error", "video_url": None, "error": str(e)}
 
-    threading.Thread(target=run_compile).start()
-    return jsonify({ "job_id": job_id })
+    threading.Thread(target=run_compile, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
 
 @app.route('/api/video-status/<job_id>', methods=['GET'])
 def check_video_status(job_id):
@@ -298,7 +361,7 @@ def generate_script():
 
     input = {
         "prompt": prompt,
-        "system_prompt": "You are a helpful tool that writes 4-5 sentence tiny, small tutorials/instructions. The tone is like a social media video narrator. Use short sentences and very simple language. They can be historical or fictional, depending on the prompt you are asked."
+        "system_prompt": "You are a helpful tool that writes 1-2 sentence tiny, small tutorials/instructions. The tone is like a social media video narrator. Use short sentences and very simple language. They can be historical or fictional, depending on the prompt you are asked."
     }
 
     try:

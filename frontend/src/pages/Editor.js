@@ -44,7 +44,7 @@ const [newScriptTxt,  setNewScriptTxt]= useState('');
     (async () => {
       try {
         /* 1️⃣ script */
-        const sRes = await fetch('http://127.0.0.1:5000/api/generate-script', {
+        const sRes = await fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/generate-script', {
           method : 'POST',
           headers: { 'Content-Type':'application/json' },
           body   : JSON.stringify({ prompt: state.prompt })
@@ -54,7 +54,7 @@ const [newScriptTxt,  setNewScriptTxt]= useState('');
         setScript(sJson.script);
 
         /* 2️⃣ start image job */
-        const jobRes = await fetch('http://127.0.0.1:5000/api/generate-images', {
+        const jobRes = await fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/generate-images', {
           method : 'POST',
           headers: { 'Content-Type':'application/json' },
           body   : JSON.stringify({ script: sJson.script, style_prompt: stylePrompt })
@@ -65,7 +65,7 @@ const [newScriptTxt,  setNewScriptTxt]= useState('');
 
         /* poll for images */
         const poll = async () => {
-          const r  = await fetch(`http://127.0.0.1:5000/api/image-status/${job_id}`);
+          const r  = await fetch(`https://faceless-api-f472a10c9d1f.herokuapp.com/api/image-status/${job_id}`);
           const j  = await r.json();
           if (j.status === 'done') {
             clearTimeout(pollRef.current);
@@ -76,7 +76,7 @@ const [newScriptTxt,  setNewScriptTxt]= useState('');
             setStage('audio');
             const auds = await Promise.all(
               j.sentences.map(async txt => {
-                const rr = await fetch('http://127.0.0.1:5000/api/generate-audio', {
+                const rr = await fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/generate-audio', {
                   method : 'POST',
                   headers: { 'Content-Type':'application/json' },
                   body   : JSON.stringify({ text: txt })
@@ -133,13 +133,13 @@ const insertSceneLocally = async () => {
   /* 3. fire BOTH backend calls in parallel */
   try {
     const [imgRes, audRes] = await Promise.all([
-      fetch('http://127.0.0.1:5000/api/regenerate-image', {
+      fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/regenerate-image', {
         method :'POST',
         headers:{ 'Content-Type':'application/json' },
         body   : JSON.stringify({ text:newImgPrompt, style_prompt: stylePrompt })
       }).then(r=>r.json()),
 
-      fetch('http://127.0.0.1:5000/api/generate-audio', {
+      fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/generate-audio', {
         method :'POST',
         headers:{ 'Content-Type':'application/json' },
         body   : JSON.stringify({ text:newScriptTxt })
@@ -213,7 +213,7 @@ const insertSceneLocally = async () => {
     setEditingIdx(null);
 
     try {
-      const r = await fetch('http://127.0.0.1:5000/api/regenerate-audio', {
+      const r = await fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/regenerate-audio', {
         method : 'POST',
         headers: { 'Content-Type':'application/json' },
         body   : JSON.stringify({ text: editingText })
@@ -267,7 +267,7 @@ const insertSceneLocally = async () => {
     setBusyImgs(prev => new Set(prev).add(idx));
 
     try {
-      const r = await fetch('http://127.0.0.1:5000/api/regenerate-image', {
+      const r = await fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/regenerate-image', {
         method :'POST',
         headers:{ 'Content-Type':'application/json' },
         body   : JSON.stringify({ text: imgPrompt, style_prompt: stylePrompt })

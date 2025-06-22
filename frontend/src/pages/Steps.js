@@ -91,7 +91,7 @@ export default function Steps() {
 
   /* ---------------- fetch once ---------------- */
   useEffect(() => {
-    fetch('http://127.0.0.1:5000/api/fetchStyles')
+    fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/fetchStyles')
       .then(r => r.json())
       .then(j => {
         if (!j.styles) throw new Error(j.error);
@@ -100,7 +100,7 @@ export default function Steps() {
       .catch(() => setErrSt('Unable to load styles'))
       .finally(() => setLoadSt(false));
 
-    fetch('http://127.0.0.1:5000/api/fetchNarrators')
+    fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/fetchNarrators')
       .then(r => r.json())
       .then(j => {
         if (!j.narrators) throw new Error(j.error);

@@ -18,7 +18,7 @@ export default function ChooseStyle() {
   useEffect(() => {
     const fetchStyles = async () => {
       try {
-        const res  = await fetch('http://127.0.0.1:5000/api/fetchStyles');
+        const res  = await fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/fetchStyles');
         const json = await res.json();
         if (!json.styles) throw new Error(json.error || 'No data');
         setStyles(json.styles);

@@ -20,7 +20,7 @@ export default function SelectNarrator() {
   useEffect(() => {
     (async () => {
       try {
-        const res  = await fetch('http://127.0.0.1:5000/api/fetchNarrators');
+        const res  = await fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/fetchNarrators');
         const json = await res.json();
         if (!json.narrators) throw new Error(json.error || 'No data');
         setNarrators(json.narrators);

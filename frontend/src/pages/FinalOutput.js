@@ -86,7 +86,7 @@ export default function FinalOutput() {
 
     const startJob = async () => {
       try {
-        const res = await fetch('http://127.0.0.1:5000/api/compile-video', {
+        const res = await fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/compile-video', {
           method :'POST',
           headers:{ 'Content-Type':'application/json' },
           body   : JSON.stringify({
@@ -104,7 +104,7 @@ export default function FinalOutput() {
         setStage('waiting');
 
         const poll = async () => {
-          const r = await fetch(`http://127.0.0.1:5000/api/video-status/${job_id}`);
+          const r = await fetch(`https://faceless-api-f472a10c9d1f.herokuapp.com/api/video-status/${job_id}`);
           const j = await r.json();
 
           if (j.status === 'done') {

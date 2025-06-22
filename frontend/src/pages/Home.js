@@ -61,7 +61,7 @@ export default function Home() {
   useEffect(() => {
     (async () => {
       try {
-        const res  = await fetch('http://127.0.0.1:5000/api/fetchVideos', {
+        const res  = await fetch('https://faceless-api-f472a10c9d1f.herokuapp.com/api/fetchVideos', {
           method : 'POST',
           headers: { 'Content-Type':'application/json' },
           body   : JSON.stringify({ user_id: USER_ID })

@@ -26,9 +26,7 @@ if not hasattr(Image, 'ANTIALIAS'):
 
 
 app = Flask(__name__)
-CORS(app)
-
-
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 # Set your S3 credentials and bucket
 
 AMAZON_ID = "AKIA4YBNZUUYG27PNW6F"

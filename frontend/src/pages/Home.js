@@ -55,7 +55,7 @@ export default function Home() {
 
   const handleCreateVideo = () => {
     if (!prompt.trim()) return;
-    navigate('/edit', { state: { prompt } });
+    navigate('/style', { state: { prompt } });
   };
 
   const handleRollTheDice = () => {

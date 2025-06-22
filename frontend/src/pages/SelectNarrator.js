@@ -37,6 +37,7 @@ export default function SelectNarrator() {
 
   const handleContinue = () => {
     // Logic to proceed to the next step
+    navigate('/editor');
     console.log('Final state:', { ...state, narrator: selectedNarrator });
   };
 

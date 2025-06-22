@@ -17,6 +17,7 @@ from moviepy.audio.AudioClip import CompositeAudioClip
 from flask import request, jsonify
 import urllib.parse
 from PIL import Image
+from math import ceil 
 
 
 # Monkey patch for Pillow 10+ compatibility with moviepy
@@ -40,16 +41,22 @@ s3_client = boto3.client(
     aws_secret_access_key=AMAZON_KEY
 )
 
+PARSE_APP_ID   = "fbx073HSS6fh9I8UqbpOY71ym5AgMSDh2SoPZQxq"
+PARSE_REST_KEY = "kHqh0AHHdiH4AbrxjcktTaghWftJb34HoZFejxMA"
+if not PARSE_APP_ID or not PARSE_REST_KEY:
+    raise RuntimeError("❌  Set PARSE_APP_ID and PARSE_REST_KEY environment variables")
+
+
 
 # Set Replicate API token
 REPLICATE_API_TOKEN = "r8_NqiTCDL7YA5yn9sHNM6zPIgeXNACIvh3M3i0f"
 os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
 
 # Prompt style prefix
-prefix_prompt = (
-    "in the style of an animated cinematic scene, vibrant colors, semi-realistic, "
-    "dynamic lighting, soft shadows, expressive characters, high detail, Pixar meets Unreal Engine: "
-)
+# prefix_prompt = (
+#     "in the style of an animated cinematic scene, vibrant colors, semi-realistic, "
+#     "dynamic lighting, soft shadows, expressive characters, high detail, Pixar meets Unreal Engine: "
+# )
 
 # In-memory job store
 jobs = {}
@@ -78,121 +85,174 @@ def split_script_into_sentences(script):
     return sentences
 
 # Blocking synchronous image generation
-def generate_image_sync(prompt):
+def generate_image_sync(args):
+    """
+    args → (style_prompt, sentence)
+    Builds:  "<style_prompt>: <sentence>"
+    Then prepends your global `prefix_prompt` string
+    before sending to Replicate.
+    """
+    style_prompt, sentence = args
+    styled_sentence = f" {sentence} {style_prompt}:" if style_prompt else sentence
+
+    # final prompt seen by the model
+    full_prompt = styled_sentence
+
     prediction = replicate.predictions.create(
         version="black-forest-labs/flux-schnell",
         input={
-            "prompt": prefix_prompt + prompt,
-            "aspect_ratio": "9:16",
+            "prompt":         full_prompt,
+            "aspect_ratio":   "9:16",
             "output_quality": 80
         }
     )
 
-    while prediction.status not in ["succeeded", "failed", "canceled"]:
+    while prediction.status not in ("succeeded", "failed", "canceled"):
         time.sleep(1)
         prediction.reload()
 
-    if prediction.status == "succeeded":
-        return prediction.output[0] if prediction.output else None
-    return None
+    return prediction.output[0] if prediction.status == "succeeded" and prediction.output else None
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  /api/compile-video
+#  – starts a render job
+#  – immediately stores a “pending” row in Back4App (Videos table)
+#  – updates that row when the render finishes / fails
+# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------
+#  /api/compile-video
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+#  /api/compile-video
+# ---------------------------------------------------------------------
 @app.route('/api/compile-video', methods=['POST'])
 def start_compile_video_job():
-    data       = request.get_json()
-    script     = data.get("script")
-    images     = data.get("images")
-    audio_urls = data.get("audio_urls")
+    data = request.get_json()
 
-    if not script or not images or not audio_urls:
-        return jsonify({"error": "script, images, and audio_urls are required"}), 400
+    # ---------- validate -------------------------------------------------
+    required = ["user_id", "prompt", "style_prompt",
+                "script", "images", "audio_urls"]
+    missing = [k for k in required if not data.get(k)]
+    if missing:
+        return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
 
+    user_id      = data["user_id"]
+    prompt       = data["prompt"]
+    style_prompt = data["style_prompt"]
+    script       = data["script"]
+    images       = data["images"]
+    audio_urls   = data["audio_urls"]
+
+    if len(images) != len(audio_urls):
+        return jsonify({"error": "images and audio_urls length mismatch"}), 400
+
+    # ---------- create “job” in memory -----------------------------------
     job_id = str(uuid.uuid4())
     video_jobs[job_id] = {"status": "pending", "video_url": None, "error": None}
     print(f"🎬 [JOB {job_id}] Started")
 
-    # ---------- threaded worker ----------
+    # ---------- create Back4App row (pending) ----------------------------
+    BA_HEADERS = {
+        "X-Parse-Application-Id": PARSE_APP_ID,
+        "X-Parse-REST-API-Key" : PARSE_REST_KEY,
+        "Content-Type"         : "application/json"
+    }
+    object_id = None
+    try:
+        resp = requests.post(
+            "https://parseapi.back4app.com/classes/Videos",
+            headers=BA_HEADERS,
+            json={
+                "user_id"     : user_id,
+                "prompt"      : prompt,
+                "style"       : style_prompt,
+                "video_id"    : job_id,
+                "video_status": "pending"
+            },
+            timeout=15
+        )
+        resp.raise_for_status()
+        object_id = resp.json()["objectId"]
+        print(f"📚 Back4App row created → {object_id}")
+    except Exception as err:
+        print("⚠️  Could not create Back4App row:", err)
+
+    # ---------- background worker ---------------------------------------
     def run_compile():
         try:
             temp_dir = f"/tmp/{job_id}"
             os.makedirs(temp_dir, exist_ok=True)
 
-            # ------------------------------------------------------------------
-            # 1)  Build each (image + voice-over) scene with a slow zoom effect
-            # ------------------------------------------------------------------
-            scene_paths = []
-            for idx, (img_url, voice_url) in enumerate(zip(images, audio_urls)):
-                print(f"   ↳ Scene {idx+1}/{len(images)} – downloading assets")
+            # ── 1. build per-scene clips (Ken-Burns zoom) ─────────────────
+            scene_files = []
+            for idx, (img_url, v_url) in enumerate(zip(images, audio_urls)):
+                print(f"   ↳ Scene {idx+1}/{len(images)}")
                 img_path   = os.path.join(temp_dir, f"img_{idx}.jpg")
                 voice_path = os.path.join(temp_dir, f"voice_{idx}.mp3")
                 clip_path  = os.path.join(temp_dir, f"clip_{idx}.mp4")
 
                 with open(img_path,   "wb") as f: f.write(requests.get(img_url).content)
-                with open(voice_path, "wb") as f: f.write(requests.get(voice_url).content)
+                with open(voice_path, "wb") as f: f.write(requests.get(v_url).content)
 
-                audio    = AudioFileClip(voice_path)
-                duration = audio.duration
-                base     = ImageClip(img_path)
+                audio     = AudioFileClip(voice_path)
+                duration  = audio.duration
+                base      = ImageClip(img_path)
 
-                # --- scale & zoom (Ken-Burns) ---
-                TARGET_W, TARGET_H = 1080, 1920
-                w, h = base.size
-                scale0 = (TARGET_H / h) if w/h > TARGET_W/TARGET_H else (TARGET_W / w)
-                def zoom(t):       # 10 % zoom-in over clip
-                    return scale0 * (1 + 0.10 * t / duration)
+                TW, TH  = 1080, 1920
+                w, h    = base.size
+                scale0  = (TH/h) if w/h > TW/TH else (TW/w)
+                zoom    = lambda t: scale0 * (1 + 0.10 * t / duration)
 
-                clip = (
-                    base
-                      .resize(zoom)                                  # dynamic resize
-                      .crop(x_center=TARGET_W/2, y_center=TARGET_H/2,
-                            width=TARGET_W, height=TARGET_H)         # 9:16 crop
-                      .set_duration(duration)
-                      .set_audio(audio)
-                      .set_fps(30)
-                      .fadein(0.4)
-                      .fadeout(0.4)
+                clip = (base
+                        .resize(zoom)
+                        .crop(x_center=TW/2, y_center=TH/2, width=TW, height=TH)
+                        .set_duration(duration)
+                        .set_audio(audio)
+                        .set_fps(30)
+                        .fadein(0.4).fadeout(0.4))
+                clip.write_videofile(
+                    clip_path, codec="libx264", audio_codec="aac",
+                    verbose=False, logger=None
                 )
-                clip.write_videofile(clip_path, codec="libx264",
-                                     audio_codec="aac",
-                                     verbose=False, logger=None)
-                scene_paths.append(clip_path)
+                scene_files.append(clip_path)
 
-            # ------------------------------------------------------------------
-            # 2)  Concatenate scenes
-            # ------------------------------------------------------------------
-            print("🔗 Concatenating scenes …")
+            # ── 2. concatenate scenes ────────────────────────────────────
             final_raw = os.path.join(temp_dir, "final_raw.mp4")
             concatenate_videoclips(
-                [VideoFileClip(p) for p in scene_paths],
+                [VideoFileClip(p) for p in scene_files],
                 method="compose"
-            ).write_videofile(final_raw, codec="libx264", audio_codec="aac",
-                              verbose=False, logger=None)
+            ).write_videofile(
+                final_raw, codec="libx264", audio_codec="aac",
+                verbose=False, logger=None
+            )
 
-            # ------------------------------------------------------------------
-            # 3)  Upload raw video → S3 (Replicate needs https)
-            # ------------------------------------------------------------------
-            video_s3_url = uploadAnyFile2S3(final_raw, f"{job_id}_raw")
-            print("☁️  Uploaded raw video to S3")
 
-            # ------------------------------------------------------------------
-            # 4)  Kick off *both* captioning & music-gen in parallel
-            # ------------------------------------------------------------------
-            print("📝 Sending to Replicate – captions & bg-music")
+            # ── ✨ NEW – get whole video length ✨ ────────────────────────
+            _tmp_clip   = VideoFileClip(final_raw)
+            vid_seconds = ceil(_tmp_clip.duration)      # int seconds
+            _tmp_clip.close()
+
+            raw_s3_url = uploadAnyFile2S3(final_raw, f"{job_id}_raw")
+            print("☁️  Raw video uploaded")
+
+            # ── 3. call Replicate (captions + music) in parallel ─────────
             def call_captions():
                 return replicate.run(
                     "fictions-ai/autocaption:18a45ff0d95feb4449d192bbdc06b4a6df168fa33def76dfc51b78ae224b599b",
                     input={
-                        "video_file_input": video_s3_url,
-                        "output_video":     True,
+                        "video_file_input" : raw_s3_url,
+                        "output_video"     : True,
                         "output_transcript": False,
-                        "font": "Poppins/Poppins-ExtraBold.ttf",
-                        "fontsize": 4,
-                        "MaxChars": 26,
-                        "color": "white",
-                        "stroke_color": "black",
-                        "stroke_width": 2.6,
-                        "subs_position": "bottom75",
-                        "highlight_color": "yellow",
-                        "kerning": -5,
-                        "opacity": 0
+                        "font"             : "Poppins/Poppins-ExtraBold.ttf",
+                        "fontsize"         : 5,
+                        "MaxChars"         : 26,
+                        "color"            : "white",
+                        "stroke_color"     : "black",
+                        "stroke_width"     : 2.6,
+                        "subs_position"    : "bottom75",
+                        "highlight_color"  : "yellow",
+                        "kerning"          : -5,
+                        "opacity"          : 0
                     }
                 )
 
@@ -200,67 +260,92 @@ def start_compile_video_job():
                 return replicate.run(
                     "ardianfe/music-gen-fn-200e:96af46316252ddea4c6614e31861876183b59dce84bad765f38424e87919dd85",
                     input={
-                        "prompt": "chill music with construction vibes sound behind, dominant in acoustic guitar and piano",
-                        "duration": 60,
-                        "top_k": 250,
-                        "top_p": 0,
-                        "temperature": 1,
-                        "continuation": False,
-                        "output_format": "wav",
-                        "multi_band_diffusion": False,
+                        "prompt"                : "chill music with construction vibes sound behind, dominant acoustic guitar & piano",
+                        "duration"              : vid_seconds,
+                        "top_k"                 : 250,
+                        "temperature"           : 1,
+                        "output_format"         : "wav",
+                        "continuation"          : False,
+                        "multi_band_diffusion"  : False,
                         "normalization_strategy": "loudness",
                         "classifier_free_guidance": 3
                     }
                 )
 
-            from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=2) as ex:
-                future_captions = ex.submit(call_captions)
-                future_music    = ex.submit(call_music)
+                cap_out, music_out = ex.submit(call_captions), ex.submit(call_music)
+                cap_out   = cap_out.result()
+                music_out = music_out.result()
 
-                caption_out = future_captions.result()
-                music_out   = future_music.result()
-
-            # ----- download captioned video -----
-            cap_url = caption_out[0] if isinstance(caption_out, list) else caption_out
-            cap_path = os.path.join(temp_dir, "captioned.mp4")
-            with open(cap_path, "wb") as f:
-                f.write(requests.get(cap_url).content)
-
-            # ----- download bg-music wav -----
+            # ── 4. download outputs ─────────────────────────────────────
+            cap_url   = cap_out[0]   if isinstance(cap_out,   list) else cap_out
             music_url = music_out[0] if isinstance(music_out, list) else music_out
-            music_path = os.path.join(temp_dir, "bg_music.wav")
-            with open(music_path, "wb") as f:
-                f.write(requests.get(music_url).content)
 
-            # ------------------------------------------------------------------
-            # 5)  Merge music with captioned video
-            # ------------------------------------------------------------------
+            cap_path   = os.path.join(temp_dir, "captioned.mp4")
+            music_path = os.path.join(temp_dir, "bg_music.wav")
+
+            for url, local in ((cap_url, cap_path), (music_url, music_path)):
+                r = requests.get(url, timeout=60)
+                r.raise_for_status()
+                with open(local, "wb") as f:
+                    f.write(r.content)
+
+            # ── 5. merge bg-music with captioned video ──────────────────
             print("🎧 Merging background music …")
             vid  = VideoFileClip(cap_path)
-            mus  = AudioFileClip(music_path).volumex(0.3)          # softer music
-            final_audio = CompositeAudioClip([vid.audio, mus.set_duration(vid.duration)])
+            mus  = AudioFileClip(music_path).volumex(0.10).set_duration(vid.duration)
+
+            final_audio = CompositeAudioClip([vid.audio, mus])
             vid_final   = vid.set_audio(final_audio)
 
             final_full = os.path.join(temp_dir, "final_captioned_music.mp4")
-            vid_final.write_videofile(final_full, codec="libx264", audio_codec="aac",
-                                      bitrate="3M", verbose=False, logger=None)
+            vid_final.write_videofile(
+                final_full,
+                codec="libx264",
+                audio_codec="aac",
+                bitrate="3M",
+                verbose=False,
+                logger=None
+            )
 
-            # ------------------------------------------------------------------
-            # 6)  Upload finished asset
-            # ------------------------------------------------------------------
+            # ── 6. upload + update state --------------------------------
             final_url = uploadAnyFile2S3(final_full, f"final_{job_id}")
-            print(f"✅ [JOB {job_id}] Done → {final_url}")
+            video_jobs[job_id] = {
+                "status"   : "done",
+                "video_url": final_url,
+                "error"    : None
+            }
 
-            video_jobs[job_id] = {"status": "done", "video_url": final_url, "error": None}
+            if object_id:
+                requests.put(
+                    f"https://parseapi.back4app.com/classes/Videos/{object_id}",
+                    headers=BA_HEADERS,
+                    json={
+                        "video_url"   : final_url,
+                        "video_status": "completed"
+                    },
+                    timeout=15
+                )
+
+            print(f"✅ [JOB {job_id}] Done")
 
         except Exception as e:
             print(f"🔥 [JOB {job_id}] Error:", e)
             video_jobs[job_id] = {"status": "error", "video_url": None, "error": str(e)}
 
-    threading.Thread(target=run_compile, daemon=True).start()
-    return jsonify({"job_id": job_id})
+            if object_id:
+                requests.put(
+                    f"https://parseapi.back4app.com/classes/Videos/{object_id}",
+                    headers=BA_HEADERS,
+                    json={
+                        "video_status": "error",
+                        "error_msg"   : str(e)[:250]
+                    },
+                    timeout=15
+                )
 
+    threading.Thread(target=run_compile, daemon=True).start()
+    return jsonify({"job_id": job_id}), 202
 
 @app.route('/api/video-status/<job_id>', methods=['GET'])
 def check_video_status(job_id):
@@ -315,24 +400,39 @@ def combine_audio_image():
 # POST to start image generation
 @app.route('/api/generate-images', methods=['POST'])
 def generate_images_async():
-    data = request.get_json()
-    script = data.get("script")
+    payload      = request.get_json()
+    script       = payload.get("script")
+    style_prompt = (payload.get("style_prompt") or "").strip()   # may be empty
+
+    print("STYLE TAGGGGS:", style_prompt)
 
     if not script:
         return jsonify({"error": "No script provided"}), 400
 
     sentences = split_script_into_sentences(script)
+
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {"status": "pending", "sentences": sentences, "images": []}
+    jobs[job_id] = {
+        "status"   : "pending",
+        "sentences": sentences,   # keep originals for the UI
+        "images"   : []
+    }
 
     def run_generation():
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            images = list(executor.map(generate_image_sync, sentences))
-        jobs[job_id]["images"] = images
-        jobs[job_id]["status"] = "done"
+        try:
+            # ↳ build an iterable of (style_prompt, sentence) tuples
+            tasks  = [(style_prompt, s) for s in sentences]
 
-    threading.Thread(target=run_generation).start()
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                imgs = list(ex.map(generate_image_sync, tasks))
 
+            jobs[job_id]["images"] = imgs
+            jobs[job_id]["status"] = "done"
+        except Exception as exc:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"]  = str(exc)
+
+    threading.Thread(target=run_generation, daemon=True).start()
     return jsonify({"job_id": job_id})
 
 @app.route('/api/image-status/<job_id>', methods=['GET'])
@@ -356,12 +456,15 @@ def generate_script():
     data = request.get_json()
     prompt = data.get("prompt")
 
-    if not prompt:
+    txt = "Please generate a short, simple, 6-7 sentence story or tutorial about the following prompt. Make sure each sentence has some specific, unique content, and ties to the overall story/prompt. The tone is like a social media video narrator. Use short sentences and very simple language. If you are asked to describe something fictional, do not mention it is fictional. Pretend it is real. Here is the prompt: "
+    txt_and_prompt = txt + prompt
+
+    if not txt_and_prompt:
         return jsonify({"error": "No prompt provided"}), 400
 
     input = {
-        "prompt": prompt,
-        "system_prompt": "You are a helpful tool that writes 1-2 sentence tiny, small tutorials/instructions. The tone is like a social media video narrator. Use short sentences and very simple language. They can be historical or fictional, depending on the prompt you are asked."
+        "prompt": txt_and_prompt,
+        "system_prompt": "You are a helpful tool"
     }
 
     try:
@@ -374,6 +477,103 @@ def generate_script():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/fetchStyles", methods=["GET"])
+def fetch_styles():
+    """
+    GET /api/fetchStyles
+    Returns: { "styles": [ {...}, {...} ] }  or  { "error": "..."}
+    """
+    try:
+        url = "https://parseapi.back4app.com/classes/Styles"
+        headers = {
+            "X-Parse-Application-Id": PARSE_APP_ID,
+            "X-Parse-REST-API-Key" : PARSE_REST_KEY,
+            "Content-Type"         : "application/json"
+        }
+
+        # if you have >100 records you can use limit / skip or order parameters
+        # see: https://docs.parseplatform.org/rest/guide/#objects
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()            # raises for 4xx / 5xx
+
+        data = resp.json().get("results", [])
+        return jsonify({ "styles": data })
+
+    except requests.exceptions.RequestException as err:
+        # network / API errors
+        return jsonify({ "error": f"Unable to reach Back4App: {err}" }), 502
+    except Exception as err:
+        # anything else
+        return jsonify({ "error": str(err) }), 500
+    
+@app.route("/api/fetchNarrators", methods=["GET"])
+def fetch_narrators():
+    """
+    GET /api/fetchStyles
+    Returns: { "styles": [ {...}, {...} ] }  or  { "error": "..."}
+    """
+    try:
+        url = "https://parseapi.back4app.com/classes/Narrators"
+        headers = {
+            "X-Parse-Application-Id": PARSE_APP_ID,
+            "X-Parse-REST-API-Key" : PARSE_REST_KEY,
+            "Content-Type"         : "application/json"
+        }
+
+        # if you have >100 records you can use limit / skip or order parameters
+        # see: https://docs.parseplatform.org/rest/guide/#objects
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()            # raises for 4xx / 5xx
+
+        data = resp.json().get("results", [])
+        return jsonify({ "narrators": data })
+
+    except requests.exceptions.RequestException as err:
+        # network / API errors
+        return jsonify({ "error": f"Unable to reach Back4App: {err}" }), 502
+    except Exception as err:
+        # anything else
+        return jsonify({ "error": str(err) }), 500
+
+import json
+@app.route("/api/fetchVideos", methods=["POST"])
+def fetch_videos():
+    payload   = request.get_json(silent=True) or {}
+    user_id   = payload.get("user_id", "").strip()
+
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    try:
+        url = "https://parseapi.back4app.com/classes/Videos"
+        headers = {
+            "X-Parse-Application-Id": PARSE_APP_ID,
+            "X-Parse-REST-API-Key" : PARSE_REST_KEY,
+            "Content-Type"         : "application/json"
+        }
+
+        # Build Parse “where” clause:
+        # { user_id: "<id>", video_status: { $in: ["pending","completed"] } }
+        where = {
+            "user_id"     : user_id,
+            "video_status": { "$in": ["pending", "completed"] }
+        }
+
+        resp = requests.get(
+            url,
+            headers=headers,
+            params={ "where": json.dumps(where), "order": "-createdAt" },
+            timeout=15
+        )
+        resp.raise_for_status()
+
+        return jsonify({ "videos": resp.json().get("results", []) })
+
+    except requests.exceptions.RequestException as err:
+        return jsonify({ "error": f"Unable to reach Back4App: {err}" }), 502
+    except Exception as err:
+        return jsonify({ "error": str(err) }), 500
+    
 @app.route('/api/generate-audio', methods=['POST'])
 def generate_audio():
     data = request.get_json()

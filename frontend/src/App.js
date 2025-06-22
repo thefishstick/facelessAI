@@ -5,7 +5,10 @@ import Home from './pages/Home';
 import EditScript from './pages/EditScript';
 import ChooseStyle from './pages/ChooseStyle';
 import SelectNarrator from './pages/SelectNarrator';
-import Editor from './pages/AppOld copy';
+import Editor from './pages/Editor';
+import FinalOutput from './pages/FinalOutput';
+import MyVideos    from './pages/MyVideos';
+import Completed    from './pages/Completed';
 
 export default function App() {
   return (
@@ -16,6 +19,9 @@ export default function App() {
         <Route path="/style"   element={<ChooseStyle />} />
         <Route path="/narrator" element={<SelectNarrator />} />
         <Route path="/editor" element={<Editor />} />
+        <Route path="/final"     element={<FinalOutput />} />
+        <Route path="/my-videos" element={<MyVideos />} />
+        <Route path="/completed" element={<Completed />} />
       </Routes>
     </Router>
   );

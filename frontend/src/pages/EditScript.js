@@ -42,7 +42,7 @@ export default function EditScript() {
       <div className="App dark-theme">
         <header className="App-header">
           <div className="logo clickable" onClick={() => navigate('/')}>
-            🎭 Faceless
+            Faceless.AI
           </div>
         </header>
         <p style={{ textAlign: 'center', marginTop: '30vh' }}>
@@ -61,7 +61,7 @@ export default function EditScript() {
     <div className="App dark-theme">
       <header className="App-header">
         <div className="logo clickable" onClick={() => navigate('/')}>
-          🎭 Faceless
+          Faceless.AI
         </div>
       </header>
 

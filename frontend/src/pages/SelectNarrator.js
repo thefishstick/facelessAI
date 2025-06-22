@@ -1,90 +1,158 @@
-import React, { useState, useRef } from 'react';
+// SelectNarrator.js
+import React, { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import '../App.css';
-
-const narrators = [
-  { id: 'narrator1', name: 'David', desc: 'Deep, resonant male voice', imgSrc: 'https://via.placeholder.com/180x160', mp3: 'https://samplelib.com/lib/preview/mp3/sample-6s.mp3' },
-  { id: 'narrator2', name: 'Sarah', desc: 'Clear, friendly female voice', imgSrc: 'https://via.placeholder.com/180x160', mp3: 'https://samplelib.com/lib/preview/mp3/sample-3s.mp3' },
-  { id: 'narrator3', name: 'Robo', desc: 'Synthetic AI narrator', imgSrc: 'https://via.placeholder.com/180x160', mp3: 'https://samplelib.com/lib/preview/mp3/sample-9s.mp3' },
-];
+import '../App.css';          // ← shared stylesheet
 
 export default function SelectNarrator() {
-  const { state } = useLocation();
-  const navigate = useNavigate();
-  const [selectedNarrator, setSelectedNarrator] = useState(null);
-  const [playingId, setPlayingId] = useState(null);
-  const audioRefs = useRef({});
+  /* ───────── routing */
+  const { state: locationState } = useLocation();   // contains: prompt & style
+  const navigate                 = useNavigate();
 
-  const togglePlay = (id) => {
-    const currentAudio = audioRefs.current[id];
-    if (!currentAudio) return;
+  /* ───────── local state */
+  const [narrators,      setNarrators]      = useState([]);   // fetched rows
+  const [loading,        setLoading]        = useState(true);
+  const [error,          setError]          = useState('');
+  const [chosen,         setChosen]         = useState(null); // full row
+  const [playingId,      setPlayingId]      = useState(null); // which sample is playing?
+  const audioRefs = useRef({});                              // { audio_id : <audio> }
 
-    // Pause other audio if one is playing
-    if (playingId && playingId !== id) {
-      audioRefs.current[playingId].pause();
+  /* ───────── fetch narrators (once) */
+  useEffect(() => {
+    (async () => {
+      try {
+        const res  = await fetch('http://127.0.0.1:5000/api/fetchNarrators');
+        const json = await res.json();
+        if (!json.narrators) throw new Error(json.error || 'No data');
+        setNarrators(json.narrators);
+      } catch (err) {
+        console.error(err);
+        setError('Unable to load narrators. Please try again later.');
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  /* ───────── play / pause sample */
+  const togglePlay = (audioId) => {
+    const el = audioRefs.current[audioId];
+    if (!el) return;
+
+    // pause any other sample
+    if (playingId && playingId !== audioId) {
+      audioRefs.current[playingId]?.pause();
     }
-    
-    // Toggle current audio
-    if (playingId === id) {
-      currentAudio.pause();
+
+    if (playingId === audioId) {
+      el.pause();
       setPlayingId(null);
     } else {
-      currentAudio.currentTime = 0;
-      currentAudio.play();
-      setPlayingId(id);
+      el.currentTime = 0;
+      el.play();
+      setPlayingId(audioId);
     }
   };
 
+  /* ───────── continue → Editor */
   const handleContinue = () => {
-    // Logic to proceed to the next step
-    navigate('/editor');
-    console.log('Final state:', { ...state, narrator: selectedNarrator });
+    if (!chosen) return;
+
+    console.log("audio chosen", chosen.audio_id)
+
+    navigate('/editor', {
+      state: {
+        ...locationState,        // prompt & style from previous screen
+        narrator_id: chosen.audio_id
+      }
+    });
   };
 
+  /* ───────── helpers */
+  const Loader = () => (
+    <div style={{ marginTop: 40 }}>
+      <div className="spinner" />
+    </div>
+  );
+
+  /* ───────── render */
   return (
     <div className="App dark-theme">
+      {/* ─── header ─── */}
       <header className="App-header">
         <div className="logo clickable" onClick={() => navigate('/')}>
-          🎭 Faceless
+          Faceless.AI
         </div>
       </header>
+
+      {/* ─── main ─── */}
       <main className="main-content">
-        <h1>Select a Narrator</h1>
+        <h1>Select&nbsp;a&nbsp;Narrator</h1>
         <p>Preview each voice and pick your favourite.</p>
-        <div className="style-grid">
-          {narrators.map(narrator => (
-            <div
-              key={narrator.id}
-              className={`style-card ${selectedNarrator === narrator.id ? 'selected' : ''}`}
-              onClick={() => setSelectedNarrator(narrator.id)}
-            >
-              <audio
-                src={narrator.mp3}
-                ref={el => (audioRefs.current[narrator.id] = el)}
-                onEnded={() => setPlayingId(null)}
-              />
-              <img src={narrator.imgSrc} alt={narrator.name} />
-              <span>{narrator.name}</span>
-              <p style={{padding: '0 0.5rem 0.5rem', margin: 0, fontSize: '0.9rem', color: '#ccc'}}>{narrator.desc}</p>
-              <button
-                className="chat-btn"
-                style={{marginBottom: '1rem'}}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  togglePlay(narrator.id);
-                }}
+
+        {loading && <Loader />}
+        {error   && <p style={{ color: 'tomato' }}>{error}</p>}
+
+        {!loading && !error && (
+          <div className="style-grid">
+            {narrators.map((n) => (
+              <div
+                key={n.audio_id}
+                className={`style-card ${
+                  chosen?.audio_id === n.audio_id ? 'selected' : ''
+                }`}
+                onClick={() => setChosen(n)}
+                
               >
-                {playingId === narrator.id ? '⏸ Pause' : '▶ Play'}
-              </button>
-            </div>
-          ))}
-        </div>
+                {/* hidden audio for preview */}
+                <audio
+                  src={n.audio_url}
+                  ref={(el) => (audioRefs.current[n.audio_id] = el)}
+                  onEnded={() => setPlayingId(null)}
+                />
+
+                <img src={n.thumbnail_url} alt={n.ui_name} />
+                <span>{n.ui_name}</span>
+                <p
+                  style={{
+                    padding: '0 0.5rem 0.5rem',
+                    margin: 0,
+                    fontSize: '0.9rem',
+                    color: '#ccc'
+                  }}
+                >
+                  {n.audio_description}
+                </p>
+
+                <button
+                  className="chat-btn"
+                  style={{ marginBottom: '0.75rem' }}
+                  onClick={(e) => {
+                    e.stopPropagation();        // don’t trigger card selection
+                    togglePlay(n.audio_id);
+                  }}
+                >
+                  {playingId === n.audio_id ? '⏸ Pause' : '▶ Play'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* navigation */}
         <div className="page-nav-buttons">
-          <button className="chat-btn" onClick={() => navigate('/style', { state })}>
+          <button
+            className="chat-btn"
+            onClick={() => navigate('/style', { state: locationState })}
+          >
             Back
           </button>
-          <button className="send-btn" onClick={handleContinue} disabled={!selectedNarrator}>
-            Finish &amp; Generate
+
+          <button
+            className="send-btn"
+            onClick={handleContinue}
+            disabled={!chosen}
+          >
+            Finish&nbsp;&amp;&nbsp;Generate
           </button>
         </div>
       </main>
